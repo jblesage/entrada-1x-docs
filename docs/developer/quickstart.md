@@ -116,63 +116,533 @@ Once your new migration file has been created, you can apply and test these chan
 
 #### 2. Create the New Model
 
-You will use the `Model_Sandbox` class exclusively to access the new `entrada.sandbox` table created by the migration. You can create a template for the new Model by running:
+You will use the Eloquent `Sandbox` model class exclusively to access the new `entrada.sandbox` table created by the migration. You can create a new file `www-root/core/api/app/Models/Entrada/Sandbox.php`. This file will generate the methods necessary to access that table.
 
-    php entrada model --create
-    
-Once the model has been created it will reside in the filesystem as `www-root/core/library/Models/Sandbox.php` and you will use `Model_Sandbox` throughout the Entrada codebase. This is possible thanks to Composer's ability to support both PSR-0 and PSR-4 autoloading.
+    <?php
 
-Here are a few examples of how you can use your new model:
+    namespace App\Models\Entrada;
 
-**Inserting data**
+    use Auth;
+    use App;
+    use Illuminate\Database\Eloquent\Model;
+    use Illuminate\Database\Eloquent\SoftDeletes;
 
-    $row = array(
-        "title" => $title,
-        "description" => $description,
-        ...
-        "created_date" => time(),
-        "created_by" => $ENTRADA_USER->getId()
-    );
-    
-    $sandbox = new Models_Sandbox($row);
-    $record = $sandbox->insert();
-    if ($record) {
-        ...
+    class Sandbox extends Model 
+    {
+        use SoftDeletes;
+
+        const CREATED_AT = 'created_date';
+        const UPDATED_AT = 'updated_date';
+        const DELETED_AT = 'deleted_date';
+        
+        /**
+         * The table associated with the model.
+         *
+         * @var string
+         */
+        protected $table = 'sandbox';
+
+        /**
+         * The storage format of the model's date columns.
+         *
+         * @var string
+         */
+        protected $dateFormat = 'U';
+
+        /**
+         * The attributes that should be mutated to dates.
+         *
+         * @var array
+         */
+        protected $dates = ['created_date', 'updated_date','deleted_date'];
+
+        /**
+         * The attributes that are mass assignable.
+         *
+         * @var array
+         */
+        protected $fillable = ['title', 'description'];
+
+        /**
+         * The user who created this sandbox
+         */
+        public function created_by() {
+            return $this->belongsTo('App\Models\Auth\User', 'created_by');
+        }
+
+        /**
+         * The user who updated this sandbox
+         */
+        public function updated_by() {
+            return $this->belongsTo('App\Models\Auth\User', 'updated_by');
+        }
+
+        public static function boot()
+         {
+            parent::boot();
+
+            /**
+             * Set fields on creating event
+             */
+            static::creating(function($model)
+            {
+                $user = Auth::user();          
+                $model->created_by = $user->id;
+                $model->updated_by = $user->id;
+            });
+
+            /**
+             * Set owner of sandbox upon creation
+             */
+            static::created(function($model)
+            {
+                $user = Auth::user();
+                $model->users()->attach($user->id);
+            });
+
+            /**
+             * Set fields on updating event
+             */
+            static::updating(function($model)
+            {
+                $user = Auth::user();
+                $model->updated_by = $user->id;
+            });
+
+            /**
+             * Set fields on deleting event if not force deleting
+             */
+            static::deleting(function($model)
+            {
+                $user = Auth::user();
+
+                if (!$model->isForceDeleting()) {
+                  $model->deleted_by = $user->id;
+                  $model->save();
+                }
+            });
+        }
+        
     }
 
-**Selecting data**
+Once that is created, you will be able to access and manipulate data of that model using Eloquent commands. [Click here to view the different ways you can query the model using Eloquent.](https://laravel.com/docs/5.4/eloquent)
 
-    $results = Models_Sandbox::fetchAllRecords();
-    if ($results) {
-        foreach ($results as $result) {
-            ...
+#### 3. Attach an ACLPolicy to the Model
+
+In order for us to determine if a user can perform a certain action, we need to use ACL. Entrada_ACL already exists, but Laravel/Lumen also has an ACL system called ```Gate```. Gate provides us with a number of convenience and security features, so we will want to integrate both together using an ACLPolicy. 
+
+The standard ```www-root/core/api/app/Policies/ACLPolicy``` can apply to most models, but if you need custom functionality, you can create one in the same folder.
+
+To attach the standard ACLPolicy to your Model, open up ```www-root/core/api/app/Providers/AuthServiceProvider``` and insert the following line into your boot() method: 
+
+    Gate::policy(Sandbox::class, ACLPolicy::class);
+
+(Make sure to use the appropriate namespaces at the top of the file). Here is an example of the full file: 
+
+    <?php
+
+    namespace App\Providers;
+
+    use Auth;
+    use App\Models\Auth\User;
+    use Illuminate\Support\Facades\Gate;
+    use Illuminate\Support\ServiceProvider;
+    use App\Auth\RegisteredAppUserProvider;
+    use App\Auth\LocalUserProvider;
+    use App\Auth\SsoUserProvider;
+    use App\Auth\LdapUserProvider;
+    use App\Policies\ACLPolicy;
+
+    use App\Models\Entrada\Sandbox;
+
+    class AuthServiceProvider extends ServiceProvider
+    {
+        /**
+         * Register the service provider.
+         *
+         * @return void
+         */
+        public function register()
+        {
+
+            // Register new user providers when functionality cannot 
+            // be handled entirely by Eloquent or Database user providers
+
+            Auth::provider('registered_apps', function ($app, $config) {
+                return new RegisteredAppUserProvider($this->createHasher($config['hasher']), $config['model']);
+            });
+
+            Auth::provider('local', function ($app, $config) {
+                return new LocalUserProvider($this->createHasher($config['hasher']), $config['model']);
+            });
+
+            Auth::provider('sso', function ($app, $config) {
+                return new SsoUserProvider($this->createHasher($config['hasher']), $config['model']);
+            });
+
+            Auth::provider('ldap', function ($app, $config) {
+                return new LdapUserProvider();
+            });
+        }
+
+        /**
+         * Boot the authentication services for the application.
+         *
+         * @return void
+         */
+        public function boot() {
+
+            // Register the ACL Policy for the Sandbox model. 
+            // Do this for all models that require ACL access.
+
+            Gate::policy(Sandbox::class, ACLPolicy::class);
+
+        }
+
+        /**
+         * Create a new instance of the hasher.
+         *
+         * @return \Illuminate\Contracts\Hashing\Hasher
+         */
+        protected function createHasher($hasher)
+        {
+            $class = '\\'.ltrim($hasher, '\\');
+
+            return new $class;
         }
     }
 
-**Updating data**
+#### 3. Create a new controller
 
-    $row = array(
-        "title" => $PROCESSED["title"],
-        "description" => $PROCESSED["description"],
-        ...
-        "updated_date" => time(),
-        "updated_by" => $ENTRADA_USER->getId()
-    );
+Once you have your model, you can now start creating the different routes that the client will access to view and manipulate the data.
+
+Create a new controller file at `/home/jblesage/Sites/entrada-1x-me/www-root/core/api/app/Http/SandboxController.php`. Here is an example:
+
+    <?php
+
+    namespace App\Http\Controllers;
+
+    use Auth;
+    use App\Models\Entrada\Sandbox;
+    use Illuminate\Http\Request;
+
+    class SandboxController extends Controller
+    {
+
+        public function __construct()
+        {
+            $this->middleware('auth');
+            $this->middleware('jwt.refreshWhenExpired');
+
+            $this->input_fields = [
+                'title' => 'required|string',
+                'description' => 'required|string',
+            ];
+        }
+
+        /**
+         * Display a listing of the resource.
+         *
+         * @param  \App\Models\Entrada\Sandbox  $sandbox
+         * @return \Illuminate\Http\Response
+         */
+        public function index(Sandbox $sandbox)
+        {
+            $this->authorize('view', $sandbox);
+
+            return [
+                'sandboxes' => $sandbox->with('created_by', 'updated_by')->orderBy('created_date', 'desc')->paginate(),
+                'current_user_can' => [
+                    'read' => Auth::user()->can('view', $sandbox),
+                    'create' => Auth::user()->can('create', $sandbox),
+                    'update' => Auth::user()->can('update', $sandbox),
+                    'delete' => Auth::user()->can('delete', $sandbox),
+                ]
+            ];
+        }
+
+        /**
+         * Store a newly created resource in storage.
+         *
+         * @param  \Illuminate\Http\Request     $request
+         * @param  \App\Models\Entrada\Sandbox  $sandbox
+         * @return \Illuminate\Http\Response
+         */
+        public function store(Request $request, Sandbox $sandbox)
+        {
+            // Authorizes the creation of sandbox
+            $this->authorize('create', $sandbox);
+
+            $this->validate($request, $this->input_fields);
+
+            $new = $sandbox->create($request->only('title', 'description'));
+
+            return response($new, 201);
+        }
+
+        /**
+         * Display the specified resource.
+         *
+         * @param  \App\Models\Entrada\Sandbox  $sandbox
+         * @param  int  $id
+         * @return \Illuminate\Http\Response
+         */
+        public function show(Sandbox $sandbox, $id)
+        {
+            $this->authorize('view', $sandbox);
+
+            return $sandbox->findOrFail($id);
+        }
+
+        /**
+         * Update the specified resource in storage.
+         * 
+         * Note: PUT and PATCH methods in Laravel require
+         * an extra header: "Content-Type: application/x-www-form-urlencoded"
+         *
+         * @param  \Illuminate\Http\Request  $request
+         * @param  int  $id
+         * @return \Illuminate\Http\Response
+         */
+        public function update(Request $request, $id)
+        {
+            $sandbox = Sandbox::findOrFail($id);
+
+            // Authorizes the update of sandbox
+            $this->authorize('update', $sandbox);
+
+            // Validate request
+            $this->validate($request, $this->input_fields);
+
+            // Save new data to sandbox model
+            $update = $sandbox->update($request->only('title', 'description'));
+
+            return response($sandbox->findOrFail($id), 200);
+        }
+
+        /**
+         * Remove the specified resource from storage.
+         *
+         * @param  \App\Models\Entrada\Sandbox  $sandbox
+         * @param  int  $id
+         * @return \Illuminate\Http\Response
+         */
+        public function destroy(Sandbox $sandbox, $id)
+        {
+            $this->authorize('delete', $sandbox);
+
+            $delete = Sandbox::destroy($id);
+
+            if ($delete)
+            {
+                // Successful delete returns a 204
+                return response('', 204);
+            }
+
+            return response('', 404);
+        }
+    }
+
+Let's look at each method in detail to learn more about how this works:
+
+**1. The constructor**
+
+    public function __construct()
+    {
+        $this->middleware('auth');
+        $this->middleware('jwt.refreshWhenExpired');
+
+        $this->input_fields = [
+            'title' => 'required|string',
+            'description' => 'required|string',
+        ];
+    }
+
+The constructor, as in any class, is where we can set data that will be shared among the class methods, as well as loading up middleware. 
+
+Any standard controller should use both of these middleware:
+
+* **$this->middleware('auth')**
+
+Since we JWT as our authentication method, the role of auth middleware is to determine: 
+
+1. Is there a Bearer token attached to the request?
+2. Is the token current?
+3. Is the token attached to the current PHP session?
+
+It may seem odd to be using JWT to attach to a session, but this was a design decision to be able to access existing features like Entrada_ACL, which rely on session variables to determine the capabilities of the logged-in user.
+
+* **$this->middleware('jwt.refreshWhenExpired')**
+
+The role of this middleware is to automatically attach a new JWT to the response if the current token has expired. Later on in this guide, we'll see how to capture this token for seamless use on the client side.
+
+**2. The index() method**
     
-    $sandbox = new Models_Sandbox($row);
-    $record = $sandbox->update();
-    if ($record) {
-        ...
+    /**
+     * Display a listing of the resource.
+     *
+     * @param  \App\Models\Entrada\Sandbox  $sandbox
+     * @return \Illuminate\Http\Response
+     */
+    public function index(Sandbox $sandbox)
+    {
+        $this->authorize('view', $sandbox);
+
+        return [
+            'sandboxes' => $sandbox->with('created_by', 'updated_by')->orderBy('created_date', 'desc')->paginate(),
+            'current_user_can' => [
+                'read' => Auth::user()->can('view', $sandbox),
+                'create' => Auth::user()->can('create', $sandbox),
+                'update' => Auth::user()->can('update', $sandbox),
+                'delete' => Auth::user()->can('delete', $sandbox),
+            ]
+        ];
     }
 
-**Deleting data**
+The index method is typically where we would want to get a list of paginated results from the model we are querying. As a best practice, you also want to include what capabilities are available to the user, as an easy way for the client to determine whether to display certain buttons.
 
-    $sandbox = new Models_Sandbox();
-    if ($sandbox->delete($PROCESSED["id"])) {
-        ...
+When we call ```$this->authorize('view', $sandbox)```, we are actually calling the view() method in ACLPolicy, which in turn requests the "read" capability from ENTRADA_ACL.
+
+When returning an array as the response, the framework will automatically convert it to JSON.
+
+More info: 
+
+- [Pagination](https://laravel.com/docs/5.4/pagination)
+- [Authorization](https://laravel.com/docs/5.4/authorization)
+
+**3. The store() method**
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request     $request
+     * @param  \App\Models\Entrada\Sandbox  $sandbox
+     * @return \Illuminate\Http\Response
+     */
+    public function store(Request $request, Sandbox $sandbox)
+    {
+        // Authorizes the creation of sandbox
+        $this->authorize('create', $sandbox);
+
+        $this->validate($request, $this->input_fields);
+
+        $new = $sandbox->create($request->only('title', 'description'));
+
+        return response($new, 201);
     }
 
-#### 3. Create the new Public Module
+Here is the standard route name for when we want to create a Model. 
+
+After calling the authorize method, we want to validate the input data from the request using the `$this->validate($request, $this->input_fields)`. The validation fields are an associative array in the structure of `"input name" => "validation types"`. Validation types are separated with a pipe character. If the input variables do not pass validation, the request automatically fails.
+
+After passing validation, we create the sandbox using the create() method. We inject the input values using the $request->only() method -- an associative array of keys and values. This is a clean, succinct way of passing only specific values to the Model.
+
+Upon successful creation, we respond with the HTTP-compliant 201 response.
+
+More info: 
+
+- [Input validation](https://laravel.com/docs/5.4/validation)
+- [Eloquent "Create" method](https://laravel.com/docs/5.4/eloquent-relationships#the-create-method)
+
+**4. The show() method**
+
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\Models\Entrada\Sandbox  $sandbox
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function show(Sandbox $sandbox, $id)
+    {
+        $this->authorize('view', $sandbox);
+
+        return $sandbox->findOrFail($id);
+    }
+
+The show() method is the standard Laravel verb to describe displaying one singular item. 
+
+After authorizing the User to view the resource, we use the `findOrFail($id)` method to get the resource. What is great about this method is that it will either return the JSON representation of the object and a response of 200, or a 404 if none found.
+
+More info: 
+
+- [Retrieving Single Models](https://laravel.com/docs/5.4/eloquent#retrieving-single-models)
+
+**5. The update() method**
+
+    /**
+     * Update the specified resource in storage.
+     * 
+     * Note: PUT and PATCH methods in Laravel require
+     * an extra header: "Content-Type: application/x-www-form-urlencoded"
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function update(Request $request, $id)
+    {
+        $sandbox = Sandbox::findOrFail($id);
+
+        // Authorizes the update of sandbox
+        $this->authorize('update', $sandbox);
+
+        // Validate request
+        $this->validate($request, $this->input_fields);
+
+        // Save new data to sandbox model
+        $update = $sandbox->update($request->only('title', 'description'));
+
+        return response($sandbox->findOrFail($id), 200);
+    }
+
+The update() method, as the name implies, allows us to update an existing resource.
+
+We start by reusing the findOrFail() method to make sure a resource exists. 
+
+After finding a resource, authorizing the user, and validating data, we are able to update the field, this time again using the request->only method.
+
+More info: 
+
+- [Eloquent update()](https://laravel.com/docs/5.4/eloquent#updates)
+
+**6. The destroy() method**
+
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  \App\Models\Entrada\Sandbox  $sandbox
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function destroy(Sandbox $sandbox, $id)
+    {
+        $this->authorize('delete', $sandbox);
+
+        $delete = Sandbox::destroy($id);
+
+        if ($delete)
+        {
+            // Successful delete returns a 204
+            return response('', 204);
+        }
+
+        return response('', 404);
+    }
+
+After authorizing the user to delete an instance, go ahead and delete the sandbox using the destroy() method. 
+
+Notice that we use the HTTP-recommended response of a 204. That response code does not allow any content within the body of the response, and in this case it is also unnecessary. 
+
+A 404 will be returned if the item did not exist before the deletion request occurred.
+
+If you notice the Model file we set up earlier, this will result in a soft delete, because we included the use of the `SoftDeletes` trait. 
+
+More info: 
+
+- [Eloquent destroy()](https://laravel.com/docs/5.4/eloquent#deleting-models)
+
+#### 4. Create the new Admin Module
 
 Entrada does not use a typical MVC pattern as you would recognize from frameworks like Laravel, CakePHP, or Symfony. Although similiar in effect, our pattern is not entirely object oriented; we use a mix of object oriented and procedural design patterns.
 
@@ -180,65 +650,9 @@ Entrada's `.htaccess` file contains `mod_rewrite` rules that pipe the majority o
 
 One significant difference between most MVC frameworks and Entrada is that our request routing is entirely automatic vs. being manually defined in a routes file. For example, if you visit [http://entrada-1x-me.dev/profile/gradebook/assignments](http://entrada-1x-me.dev/profile/gradebook/assignments) in your browser, Entrada will be loading the `www-root/core/modules/public/profile/gradebook/assignments/index.inc.php` file.
  
- For a more thorough overview of this information please see the [Directory Structure](overview/#directory-structure) section within Overview. 
- 
- We will begin by creating a public module in the `www-root/core/modules/public` folder. Create a new file in this directory called `sandbox.inc.php` and place the following inside:
- 
-     <?php
-     /**
-      * Entrada [ http://www.entrada-project.org ]
-      */
-     
-     if (!defined("PARENT_INCLUDED")) {
-         exit;
-     } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
-         header("Location: " . ENTRADA_URL);
-         exit;
-     } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "read")) {
-         add_error("Your account does not have the permissions required to use this module.");
-     
-         echo display_error();
-     
-         application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
-     } else {
-         /*
-          * Updates the <title></title> of the page.
-          */
-         $PAGE_META["title"] = $translate->_("Public Sandbox");
-     
-         /*
-          * Adds a breadcrumb to the breadcrumb trail.
-          */
-         $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/sandbox", "title" => $translate->_("Public Sandbox"));
-     
-         /*
-          * Renders the sandbox sidebar View Helper.
-          */
-         $sidebar = new Views_Sandbox_Sidebar();
-         $sidebar->render();
-         ?>
-     
-         <h1><?php echo $translate->_("Public Sandbox"); ?></h1>
-     
-         <?php
-         /*
-          * Models_Sandbox::fetchAllRecords() will return all non-deleted records from the sandboxes table as an array of objects.
-          */
-         $results = Models_Sandbox::fetchAllRecords();
-         if ($results) {
-             foreach ($results as $result) {
-                 echo "<div id=\"sandbox-" . $result->getID() . "\" class=\"sandboxes space-above space-below\">";
-                 echo "  <h3>" . html_encode($result->getTitle()) . "</h3>";
-                 echo    html_encode($result->getDescription());
-                 echo "</div>";
-                 echo "<hr />";
-             }
-         }
-     }
+For a more thorough overview of this information please see the [Directory Structure](overview/#directory-structure) section within Overview. 
 
-#### 4. Create the new Admin Modules
-
-While the public module example above was quite simple (there was only a single file), you can create a much more extensible hierarchy by creating components within your modules. Here is an example of the Sandbox modules administrative file structure:
+While the admin module example in this tutorial is quite simple (there was only a single file), you can create a much more extensible hierarchy by creating components within your modules. Here is an example of the Sandbox modules administrative file structure, if you wanted to have multiple URLs for your module:
 
     www-root/core/modules/admin/
         \_ sandbox.inc.php
@@ -247,570 +661,767 @@ While the public module example above was quite simple (there was only a single 
             \_ sandbox/edit.inc.php
             \_ sandbox/index.inc.php
 
-**sandbox.inc.php** (1 of 5)
-
-Within `www-root/core/modules/admin/sandbox.inc.php` place the following content:
+However, in this case, we will be creating a single-page app with VueJS, so just the single `www-root/core/modules/admin/sandbox.inc.php` file will be necessary:
 
     <?php
     /**
      * Entrada [ http://www.entrada-project.org ]
+     *
+     * @author Matt Simpson <simpson@queensu.ca>
+     * @copyright Copyright 2016 Queen's University. All Rights Reserved.
      */
-    
-    if (!defined("PARENT_INCLUDED")) {
-        exit;
-    } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
-        header("Location: " . ENTRADA_URL);
-        exit;
-    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "update", false)) {
-        add_error("Your account does not have the permissions required to use this module.");
-    
-        echo display_error();
-    
-        application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
-    } else {
-        /*
-         * Adds a breadcrumb to the breadcrumb trail.
-         */
-        $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/admin/sandbox", "title" => $translate->_("Sandbox Admin"));
-    
-        /*
-         * More information on our global namespace is documented http://docs.entrada-project.org/developer/namespace/
-         * Some commonly used ones include $HEAD[] and $ONLOAD[].
-         */
-    
-        /*
-         * Renders the sandbox sidebar View Helper.
-         */
-        $sidebar = new Views_Sandbox_Sidebar();
-        $sidebar->render();
-    
-        if ($router && $router->initRoute()) {
-            /*
-             * Loads user specific preferences for this module that are persistent between logins. This information
-             * is stored in the entrada_auth.user_preferences table. Any preferences that are changed by the user are
-             * updated below by the preferences_update() function.
-             */
-            $PREFERENCES = preferences_load($MODULE);
-    
-            $module_file = $router->getRoute();
-            if ($module_file) {
-                require_once($module_file);
-            }
-    
-            /*
-             * This checks to see if any preferences have been changed, and updates them within the
-             * entrada_auth.user_preferences table as needed.
-             */
-            preferences_update($MODULE, $PREFERENCES);
-        }
-    }
 
-**sandbox/add.inc.php** (2 of 5)
-
-Within `www-root/core/modules/admin/sandbox/add.inc.php` place the following content:
-
-    <?php
-    /**
-     * Entrada [ http://www.entrada-project.org ]
-     */
-    
-    if (!defined("PARENT_INCLUDED")) {
-        exit;
-    } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
-        header("Location: " . ENTRADA_URL);
-        exit;
-    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "create")) {
-        add_error("Your account does not have the permissions required to use this module.");
-    
-        echo display_error();
-    
-        application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
-    } else {
-        $PAGE_META["title"] = $translate->_("Add Sandbox");
-    
-        $BREADCRUMB[] = array("title" => $translate->_("Add Sandbox"));
-    
-        /*
-         * Error checking portion of the add page.
-         */
-        switch ($STEP) {
-            case 2 :
-                /*
-                 * Required: title
-                 * Input cleaning includes trimming, removing HTML, ensuring field is between 1 and 255 characters.
-                 */
-                if (isset($_POST["title"]) && ($title = clean_input($_POST["title"], array("trim", "nohtml", "min:1", "max:255")))) {
-                    $PROCESSED["title"] = $title;
-                } else {
-                    $PROCESSED["title"] = "";
-    
-                    add_error($translate->_("Please provide a title, which should be between 1 and 255 characters."));
-                }
-    
-                /*
-                 * Not Required: description
-                 * Input cleaning includes trimming, removing HTML, and ensuring field is at least 1 character.
-                 */
-                if (isset($_POST["description"]) && ($description = clean_input($_POST["description"], array("trim", "nohtml", "min:1")))) {
-                    $PROCESSED["description"] = $description;
-                } else {
-                    $PROCESSED["description"] = "";
-                }
-    
-                if (!has_error()) {
-                    /*
-                     * Adding a created_date and created_by record for the sandbox table.
-                     */
-                    $PROCESSED["created_date"] = time();
-                    $PROCESSED["created_by"] = $ENTRADA_USER->getID();
-    
-                    /*
-                     * Instantiates a new Models_Sandbox, inserts the row into the sandbox table, and returns
-                     * the new auto-incremented id of this sandbox record.
-                     */
-                    $sandbox = new Models_Sandbox($PROCESSED);
-                    $record = $sandbox->insert();
-                    if ($record) {
-                        /*
-                         * Adds a success message that will display on the next page.
-                         */
-                        Entrada_Utilities_Flashmessenger::addMessage(sprintf($translate->_("The %s sandbox has been created successfully."), $title), "success", $MODULE);
-    
-                        /*
-                         * Logs the successful creation of the sandbox.
-                         */
-                        application_log("success", "Successfully created sandbox ID [" . $record->getID() . "].");
-    
-                        /*
-                         * Redirects the user to the admin page.
-                         */
-                        header("Location: " . ENTRADA_URL . "/admin/sandbox");
-                        exit;
-                    } else {
-                        /*
-                         * Sets an error message that will show to the user.
-                         */
-                        add_error($translate->_("We failed to create the %s sandbox. Please try again later."));
-    
-                        /*
-                         * Logs the error message along with any error returned by the database server.
-                         */
-                        application_log("error", "Failed to create a sandbox record. Database said:" . $db->ErrorMsg());
-                    }
-                }
-            break;
-            case 1 :
-            default :
-                /*
-                 * Sets the fields used by the Views_Sandbox_Form form.
-                 */
-                $PROCESSED = array(
-                    "title" => "",
-                    "description" => "",
-                );
-            break;
-        }
-        ?>
-    
-        <h1><?php echo $translate->_("Add Sandbox"); ?></h1>
-    
-        <?php
-        /*
-         * Displays any error messages that have been set.
-         */
-        if (has_error()) {
-            echo display_error();
-        }
-    
-        /*
-         * Required options used by the form renderer.
-         */
-        $options = array(
-            "action_url" => ENTRADA_RELATIVE . "/admin/sandbox?section=add",
-            "cancel_url" => ENTRADA_RELATIVE . "/admin/sandbox",
-        );
-    
-        /*
-         * Pushes the safely sanitized $PROCESSED array into options, which is passed to the form renderer.
-         */
-        $options = array_merge($options, $PROCESSED);
-    
-        /*
-         * Renders the sandbox sidebar View Helper.
-         */
-        $sandbox_form = new Views_Sandbox_Form();
-        $sandbox_form->render($options);
-    }
-
-
-**sandbox/delete.inc.php** (3 of 5)
-
-Within `www-root/core/modules/admin/sandbox/delete.inc.php` place the following content:
-
-    <?php
-    /**
-     * Entrada [ http://www.entrada-project.org ]
-     */
-    
-    if (!defined("PARENT_INCLUDED")) {
-        exit;
-    } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
-        header("Location: " . ENTRADA_URL);
-        exit;
-    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "delete")) {
-        add_error("Your account does not have the permissions required to use this module.");
-    
-        echo display_error();
-    
-        application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
-    } else {
-        $PAGE_META["title"] = $translate->_("Delete Sandboxes");
-    
-        $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/admin/sandbox?section=delete", "title" => $translate->_("Delete Sandboxes"));
-    
-        if (isset($_POST["delete"]) && is_array($_POST["delete"]) && !empty($_POST["delete"])) {
-            /*
-             * An empty array of ids to delete.
-             */
-            $delete_ids = array();
-    
-            foreach ($_POST["delete"] as $id) {
-                if ($id = (int) $id) {
-                    $delete_ids[] = $id;
-                }
-            }
-    
-            if ($delete_ids) {
-                /*
-                 * Mark whether or not the user has already confirmed that these should be deleted.
-                 */
-                $confirmed = ((isset($_POST["confirmed"]) && $_POST["confirmed"] == 1) ? 1 : 0);
-    
-                if ($confirmed) {
-                    /*
-                     * Using the Models_Sandbox's delete() method, delete the array of ids.
-                     */
-                    $sandbox = new Models_Sandbox();
-                    if ($sandbox->delete($delete_ids)) {
-                        /*
-                         * Adds a success message that will display on the next page.
-                         */
-                        Entrada_Utilities_Flashmessenger::addMessage($translate->_("The selected sandboxes have been deleted successfully."), "success", $MODULE);
-    
-                        /*
-                         * Logs the successful deletion of the sandboxes.
-                         */
-                        application_log("success", "Successfully deleted sandbox IDS [" . implode(", ", $delete_ids) . "].");
-                    } else {
-                        /*
-                         * Sets an error message that will show to the user.
-                         */
-                        Entrada_Utilities_Flashmessenger::addMessage($translate->_("We failed to delete the selected sandboxes. Please try again later."), "error", $MODULE);
-    
-                        /*
-                         * Logs the error message along with any error returned by the database server.
-                         */
-                        application_log("error", "Failed to delete the sandbox records. Database said:" . $db->ErrorMsg());
-                    }
-    
-                    /*
-                     * Redirects the user to the admin page.
-                     */
-                    header("Location: " . ENTRADA_URL . "/admin/sandbox");
-                    exit;
-                } else {
-                    ?>
-    
-                    <h1><?php echo $translate->_("Delete Sandboxes"); ?></h1>
-    
-                    <?php
-                    echo display_notice($translate->_("Please confirm that you wish to delete the following sandboxes."));
-    
-                    $results = Models_Sandbox::fetchRecords($delete_ids);
-                    if ($results) {
-                        ?>
-                        <form action="<?php echo ENTRADA_RELATIVE; ?>/admin/sandbox?section=delete" method="post">
-                            <input type="hidden" name="confirmed" value="1" />
-                            <table class="table table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>&nbsp;</th>
-                                        <th>Title</th>
-                                        <th>Description</th>
-                                    </tr>
-                                </thead>
-                                <tfoot>
-                                    <tr>
-                                        <td colspan="3">
-                                            <button class="btn btn-danger"><?php echo $translate->_("Confirm Removal"); ?></button>
-                                        </td>
-                                    </tr>
-                                </tfoot>
-                                <tbody>
-                                <?php foreach ($results as $result) : ?>
-                                    <tr id="sandbox-<?php echo $result->getID(); ?>">
-                                        <td>
-                                            <input type="checkbox" name="delete[]" value="<?php echo $result->getID(); ?>" checked="checked" />
-                                        </td>
-                                        <td><a href="<?php echo ENTRADA_RELATIVE; ?>/admin/sandbox?section=edit&amp;id=<?php echo $result->getID(); ?>"><?php echo html_encode($result->getTitle()); ?></a></td>
-                                        <td><?php echo html_encode($result->getDescription()); ?></td>
-                                    </tr>
-                                <?php endforeach; ?>
-                                </tbody>
-                            </table>
-                        </form>
-                        <?php
-                    }
-                }
-            } else {
-                header("Location: " . ENTRADA_URL . "/admin/sandbox");
-                exit;
-            }
-        } else {
-            header("Location: " . ENTRADA_URL . "/admin/sandbox");
-            exit;
-        }
-    }
-
-
-**sandbox/edit.inc.php** (4 of 5)
-
-Within `www-root/core/modules/admin/sandbox/edit.inc.php` place the following content:
-
-    <?php
-    /**
-     * Entrada [ http://www.entrada-project.org ]
-     */
-    
     if (!defined("PARENT_INCLUDED")) {
         exit;
     } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
         header("Location: " . ENTRADA_URL);
         exit;
     } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "update")) {
-        add_error("Your account does not have the permissions required to use this module.");
-    
+        add_error("Your account does not have the permissions required to use this module.<br /><br />If you believe you are receiving this message in error please contact <a href=\"mailto:" . html_encode($AGENT_CONTACTS["administrator"]["email"]) . "\">" . html_encode($AGENT_CONTACTS["administrator"]["name"]) . "</a> for assistance.");
+
         echo display_error();
-    
+
         application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
     } else {
-        $PAGE_META["title"] = $translate->_("Edit Sandbox");
-    
-        $BREADCRUMB[] = array("title" => $translate->_("Edit Sandbox"));
-    
-        if (isset($_GET["id"]) && ($id = clean_input($_GET["id"], "int"))) {
-            $PROCESSED = Models_Sandbox::fetchRowByID($id)->toArray();
-        }
-    
-        if ($PROCESSED) {
-            /*
-             * Error checking portion of the edit page.
-             */
-            switch ($STEP) {
-                case 2 :
-                    /*
-                     * Required: title
-                     * Input cleaning includes trimming, removing HTML, ensuring field is between 1 and 255 characters.
-                     */
-                    if (isset($_POST["title"]) && ($title = clean_input($_POST["title"], array("trim", "nohtml", "min:1", "max:255")))) {
-                        $PROCESSED["title"] = $title;
-                    } else {
-                        $PROCESSED["title"] = "";
-    
-                        add_error($translate->_("Please provide a title, which should be between 1 and 255 characters."));
-                    }
-    
-                    /*
-                     * Not Required: description
-                     * Input cleaning includes trimming, removing HTML, and ensuring field is at least 1 character.
-                     */
-                    if (isset($_POST["description"]) && ($description = clean_input($_POST["description"], array("trim", "nohtml", "min:1")))) {
-                        $PROCESSED["description"] = $description;
-                    } else {
-                        $PROCESSED["description"] = "";
-                    }
-    
-                    if (!has_error()) {
-                        /*
-                         * Adding a created_date and created_by record for the sandbox table.
-                         */
-                        $PROCESSED["updated_date"] = time();
-                        $PROCESSED["updated_by"] = $ENTRADA_USER->getID();
-    
-                        /*
-                         * Instantiates a new Models_Sandbox, update the row into the sandbox table, and returns
-                         * the new auto-incremented id of this sandbox record.
-                         */
-                        $sandbox = new Models_Sandbox($PROCESSED);
-                        $record = $sandbox->update();
-                        if ($record) {
-                            /*
-                             * Adds a success message that will display on the next page.
-                             */
-                            Entrada_Utilities_Flashmessenger::addMessage(sprintf($translate->_("The %s sandbox has been updated successfully."), $title), "success", $MODULE);
-    
-                            /*
-                             * Logs the successful update of this sandbox.
-                             */
-                            application_log("success", "Successfully updated sandbox ID [" . $record->getID() . "].");
-    
-                            /*
-                             * Redirects the user to the admin page.
-                             */
-                            header("Location: " . ENTRADA_URL . "/admin/sandbox");
-                            exit;
-                        } else {
-                            /*
-                             * Sets an error message that will show to the user.
-                             */
-                            add_error($translate->_("We failed to update the %s sandbox. Please try again later."));
-    
-                            /*
-                             * Logs the error message along with any error returned by the database server.
-                             */
-                            application_log("error", "Failed to update a sandbox record. Database said:" . $db->ErrorMsg());
-                        }
-                    }
-                    break;
-                case 1 :
-                default :
-                    continue;
-                    break;
-            }
-            ?>
-    
-            <h1><?php echo $translate->_("Edit Sandbox"); ?></h1>
-    
-            <?php
-            /*
-             * Displays any error messages that have been set.
-             */
-            if (has_error()) {
-                echo display_error();
-            }
-    
-            /*
-             * Required options used by the form renderer.
-             */
-            $options = array(
-                "action_url" => ENTRADA_RELATIVE . "/admin/sandbox?section=edit&id=" . $PROCESSED["id"],
-                "cancel_url" => ENTRADA_RELATIVE . "/admin/sandbox",
-            );
-    
-            /*
-             * Pushes the safely sanitized $PROCESSED array into options, which is passed to the form renderer.
-             */
-            $options = array_merge($options, $PROCESSED);
-    
-            /*
-             * Renders the sandbox sidebar View Helper.
-             */
-            $sandbox_form = new Views_Sandbox_Form();
-            $sandbox_form->render($options);
-        } else {
-            header("Location: " . ENTRADA_URL . "/admin/sandbox");
-            exit;
-        }
+        $PAGE_META["title"] = "Admin: Sandbox";
+        $PAGE_META["description"] = "";
+        $PAGE_META["keywords"] = "";
+
+        $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/admin/sandbox", "title" => "Admin Side: Sandbox");
+
+        $HEAD[]   = '<link rel="stylesheet" href="'.ENTRADA_URL.'/css/sandbox.css">';
+        $JQUERY[] = '<script src="https://unpkg.com/vue@2.2.1"></script>';
+        $JQUERY[] = '<script src="https://unpkg.com/axios@0.15.3/dist/axios.min.js"></script>';
+
+        $sidebar = new Views_Sandbox_Sidebar();
+        $sidebar->render();
+        ?>
+        <div id="module-sandbox">
+
+          <div class="pagination clearfix">
+            <button type="button" data-toggle="modal" data-target="#create-sandbox" class="btn btn-primary pull-left" v-if="current_user_can.create">
+              <?php echo $translate->_("Create New Sandbox"); ?>
+            </button>
+
+            <p class="text-center summary">
+              <?php echo $translate->_("Page {{ sandboxes.current_page }} / {{ sandboxes.last_page }} &mdash; {{ sandboxes.total }} Sandboxes Found"); ?>
+            </p>
+
+            <ul class="pull-right">
+              <li v-bind:class="{ disabled:!sandboxes.prev_page_url }">
+                <a href="#" aria-label="Previous" title="Previous" v-on:click.prevent="sandboxes.prev_page_url ? getSandboxes(sandboxes.prev_page_url) : null">
+                  <span aria-hidden="true">«</span>
+                </a>
+              </li>
+              <li v-bind:class="{ disabled:!sandboxes.next_page_url }">
+                <a href="#" aria-label="Next" v-on:click.prevent="sandboxes.next_page_url ? getSandboxes(sandboxes.next_page_url) : null">
+                  <span aria-hidden="true">»</span>
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table table-borderless">
+              <tr>
+                <th width="150"><?php echo $translate->_("Title"); ?></th>
+                <th width="200"><?php echo $translate->_("Description"); ?></th>
+                <th><?php echo $translate->_("Created By"); ?></th>
+                <th><?php echo $translate->_("Updated By"); ?></th>
+                <th><?php echo $translate->_("Actions"); ?></th>
+              </tr>
+              <tr v-for="sandbox in sandboxes.data">
+                <td>{{ sandbox.title }}</td>
+                <td>{{ sandbox.description }}</td>
+                <td><span v-if="sandbox.created_by">{{ sandbox.created_by.firstname }} {{ sandbox.created_by.lastname }}</span></td>
+                <td><span v-if="sandbox.updated_by">{{ sandbox.updated_by.firstname }} {{ sandbox.updated_by.lastname }}</span></td>
+                <td>
+                  <button class="edit-modal btn btn-warning" v-if="current_user_can.update" v-on:click.prevent="editSandbox(sandbox)">
+                    <span class="glyphicon glyphicon-edit"></span> <?php echo $translate->_("Edit"); ?>
+                  </button>
+                  <button class="edit-modal btn btn-danger" v-if="current_user_can.delete" v-on:click.prevent="deleteSandbox(sandbox.id)">
+                    <span class="glyphicon glyphicon-trash"></span> <?php echo $translate->_("Delete"); ?>
+                  </button>
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <?php
+
+          // Create sandbox modal
+          $create_sandbox_modal = new Views_Gradebook_Modal([
+            "id" => "create-sandbox",
+            "title" => $translate->_("Create New Sandbox"),
+          ]);
+
+          $create_sandbox_modal->setBody('
+            <form class="form-horizontal" v-on:submit.prevent="createSandbox">
+              <div class="control-group" v-bind:class="{ error: form_errors.title }">
+                <label class="control-label" for="newTitle">'.$translate->_("Title").'</label>
+                <div class="controls">
+                  <input type="text" id="newTitle" placeholder="'.$translate->_("Title").'" v-model="new_sandbox.title">
+                  <p v-if="form_errors.title" class="error text-error">
+                    {{ form_errors.title }}
+                  </p>
+                </div>
+              </div>
+              <div class="control-group" v-bind:class="{ error: form_errors.description }">
+                <label class="control-label" for="newDescription">'.$translate->_("Description").'</label>
+                <div class="controls">
+                  <textarea id="newDescription" placeholder="'.$translate->_("Description").'" v-model="new_sandbox.description"></textarea>
+                  <p v-if="form_errors.description" class="error text-error">
+                    {{ form_errors.description }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <button type="submit" class="btn btn-success pull-right">'.$translate->_("Create Sandbox").'</button>
+              </div>
+            </form>
+          ');
+
+          $create_sandbox_modal->render();
+
+          // Edit sandbox modal
+          $edit_sandbox_modal = new Views_Gradebook_Modal([
+            "id" => "edit-sandbox",
+            "title" => $translate->_("Edit")." ".'"{{ update_sandbox.title }}"',
+          ]);
+
+          $edit_sandbox_modal->setBody('
+            <form class="form-horizontal" v-on:submit.prevent="updateSandbox(update_sandbox.id)">
+              <div class="control-group" v-bind:class="{ error: form_errors.title }">
+                <label class="control-label" for="updateTitle">'.$translate->_("Title").'</label>
+                <div class="controls">
+                  <input type="text" id="updateTitle" placeholder="'.$translate->_("Title").'" v-model="update_sandbox.title">
+                  <p v-if="form_errors.title" class="error text-error">
+                    {{ form_errors.title }}
+                  </p>
+                </div>
+              </div>
+              <div class="control-group" v-bind:class="{ error: form_errors.description }">
+                <label class="control-label" for="updateDescription">'.$translate->_("Description").'</label>
+                <div class="controls">
+                  <textarea id="updateDescription" placeholder="'.$translate->_("Description").'" v-model="update_sandbox.description"></textarea>
+                  <p v-if="form_errors.description" class="error text-error">
+                    {{ form_errors.description }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <button type="submit" class="btn btn-success pull-right">'.$translate->_("Update Sandbox").'</button>
+              </div>
+            </form>
+          ');
+
+          $edit_sandbox_modal->render();
+
+          ?>
+            
+        </div>
+        <?php
+
+        // sandbox.js needs to run after DOM content
+        echo '<script src="'.ENTRADA_URL.'/javascript/sandbox.js?release='.html_encode(APPLICATION_VERSION).'"></script>';
     }
 
-**sandbox/index.inc.php** (5 of 5)
+Let's go through the different parts of this file: 
 
-Within `www-root/core/modules/admin/sandbox/index.inc.php` place the following content:
+**File Header**
 
     <?php
     /**
      * Entrada [ http://www.entrada-project.org ]
+     *
+     * @author Matt Simpson <simpson@queensu.ca>
+     * @copyright Copyright 2016 Queen's University. All Rights Reserved.
      */
-    
+
     if (!defined("PARENT_INCLUDED")) {
         exit;
     } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
         header("Location: " . ENTRADA_URL);
         exit;
-    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "update", false)) {
-        add_error("Your account does not have the permissions required to use this module.");
-    
+    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "update")) {
+        add_error("Your account does not have the permissions required to use this module.<br /><br />If you believe you are receiving this message in error please contact <a href=\"mailto:" . html_encode($AGENT_CONTACTS["administrator"]["email"]) . "\">" . html_encode($AGENT_CONTACTS["administrator"]["name"]) . "</a> for assistance.");
+
         echo display_error();
-    
+
         application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
     } else {
-        /*
-         * Updates the <title></title> of the page.
-         */
-        $PAGE_META["title"] = $translate->_("Sandbox Admin Dashboard");
-    
-        /*
-         * Adds a breadcrumb to the breadcrumb trail.
-         */
-        $BREADCRUMB[] = array("title" => "Dashboard");
-        ?>
-    
-        <h1><?php echo $translate->_("Sandbox Admin Dashboard"); ?></h1>
-    
+        $PAGE_META["title"] = "Admin: Sandbox";
+        $PAGE_META["description"] = "";
+        $PAGE_META["keywords"] = "";
+
+        $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/admin/sandbox", "title" => "Admin Side: Sandbox");
+
+        $HEAD[]   = '<link rel="stylesheet" href="'.ENTRADA_URL.'/css/sandbox.css">';
+        $JQUERY[] = '<script src="https://unpkg.com/vue@2.2.1"></script>';
+        $JQUERY[] = '<script src="https://unpkg.com/axios@0.15.3/dist/axios.min.js"></script>';
+
+At the beginning of every module file, we include checks for if the user can perform certain tasks (ie. `!$ENTRADA_ACL->amIAllowed("sandbox", "update")`), as well as the page meta and any CSS and Javascript files we want to include.
+
+In this case, the two JS libraries we are including are VueJS 2 and Axios.
+
+More info: 
+
+- [VueJS 2](https://vuejs.org/v2/guide/)
+- [Axios](https://github.com/mzabriskie/axios)
+
+**Sidebar View Helper**
+
+    $sidebar = new Views_Sandbox_Sidebar();
+    $sidebar->render();
+
+Here, we are including and immediately rendering a View helper. See section 7 below on what these are and how to create one yourself.
+
+In this case, the sidebar renders a few links within the sidebar to easily access both the public and admin frontends of the Sandbox module.
+
+**VueJS Hook Element**
+
+    <div id="module-sandbox">
+
+Every VueJS instance requires it be given a single element to watch and hook into. In this case, we will be hooking into the #module-sandbox element.
+
+**Pagination Header**
+
+    <div class="pagination clearfix">
+        <button type="button" data-toggle="modal" data-target="#create-sandbox" class="btn btn-primary pull-left" v-if="current_user_can.create">
+          <?php echo $translate->_("Create New Sandbox"); ?>
+        </button>
+
+        <p class="text-center summary">
+          <?php echo $translate->_("Page {{ sandboxes.current_page }} / {{ sandboxes.last_page }} &mdash; {{ sandboxes.total }} Sandboxes Found"); ?>
+        </p>
+
+        <ul class="pull-right">
+          <li v-bind:class="{ disabled:!sandboxes.prev_page_url }">
+            <a href="#" aria-label="Previous" title="Previous" v-on:click.prevent="sandboxes.prev_page_url ? getSandboxes(sandboxes.prev_page_url) : null">
+              <span aria-hidden="true">«</span>
+            </a>
+          </li>
+          <li v-bind:class="{ disabled:!sandboxes.next_page_url }">
+            <a href="#" aria-label="Next" v-on:click.prevent="sandboxes.next_page_url ? getSandboxes(sandboxes.next_page_url) : null">
+              <span aria-hidden="true">»</span>
+            </a>
+          </li>
+        </ul>
+      </div>
+
+There are a number of things going on in this code sample: 
+
+The button to create a new sandbox will trigger opening the modal with an id of `create-sandbox`. Not only this, but it will also only display if the VueJS data setting `current_user_can.create` is set to `true`.
+
+You will also notice a lot of curly braces around variable names. VueJS uses these to display the result of variables stored in memory. 
+
+`v-on:click=methodName` will run a method upon the click event, while `v-bind:class` causes a classname to appear if a variable follows the logic given (ex. returns true).
+
+`v-on:click.prevent` is a simple convenience shortform for `e.preventDefault()`. It can still be included within the method itself if you prefer.
+
+More info: 
+
+- [v-on](https://vuejs.org/v2/api/#v-on)
+- [v-bind](https://vuejs.org/v2/api/#v-bind)
+- [v-on modifiers (click.prevent)](https://vuejs.org/v2/api/#v-on)
+
+**Table of Results**
+
+    <div class="table-responsive">
+        <table class="table table-borderless">
+          <tr>
+            <th width="150"><?php echo $translate->_("Title"); ?></th>
+            <th width="200"><?php echo $translate->_("Description"); ?></th>
+            <th><?php echo $translate->_("Created By"); ?></th>
+            <th><?php echo $translate->_("Updated By"); ?></th>
+            <th><?php echo $translate->_("Actions"); ?></th>
+          </tr>
+          <tr v-for="sandbox in sandboxes.data">
+            <td>{{ sandbox.title }}</td>
+            <td>{{ sandbox.description }}</td>
+            <td><span v-if="sandbox.created_by">{{ sandbox.created_by.firstname }} {{ sandbox.created_by.lastname }}</span></td>
+            <td><span v-if="sandbox.updated_by">{{ sandbox.updated_by.firstname }} {{ sandbox.updated_by.lastname }}</span></td>
+            <td>
+              <button class="edit-modal btn btn-warning" v-if="current_user_can.update" v-on:click.prevent="editSandbox(sandbox)">
+                <span class="glyphicon glyphicon-edit"></span> <?php echo $translate->_("Edit"); ?>
+              </button>
+              <button class="edit-modal btn btn-danger" v-if="current_user_can.delete" v-on:click.prevent="deleteSandbox(sandbox.id)">
+                <span class="glyphicon glyphicon-trash"></span> <?php echo $translate->_("Delete"); ?>
+              </button>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+Here we want to display the list of sandboxes retrieved from the API.
+
+`v-for="sandbox in sandboxes.data"` is an iterator over each item within `sandboxes.data`, and repeats the element it is attached to. 
+
+More info: 
+
+- [v-for](https://vuejs.org/v2/guide/list.html#v-for)
+
+**Create and Edit Modals**
+
+      <?php
+
+      // Create sandbox modal
+      $create_sandbox_modal = new Views_Gradebook_Modal([
+        "id" => "create-sandbox",
+        "title" => $translate->_("Create New Sandbox"),
+      ]);
+
+      $create_sandbox_modal->setBody('
+        <form class="form-horizontal" v-on:submit.prevent="createSandbox">
+          <div class="control-group" v-bind:class="{ error: form_errors.title }">
+            <label class="control-label" for="newTitle">'.$translate->_("Title").'</label>
+            <div class="controls">
+              <input type="text" id="newTitle" placeholder="'.$translate->_("Title").'" v-model="new_sandbox.title">
+              <p v-if="form_errors.title" class="error text-error">
+                {{ form_errors.title }}
+              </p>
+            </div>
+          </div>
+          <div class="control-group" v-bind:class="{ error: form_errors.description }">
+            <label class="control-label" for="newDescription">'.$translate->_("Description").'</label>
+            <div class="controls">
+              <textarea id="newDescription" placeholder="'.$translate->_("Description").'" v-model="new_sandbox.description"></textarea>
+              <p v-if="form_errors.description" class="error text-error">
+                {{ form_errors.description }}
+              </p>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <button type="submit" class="btn btn-success pull-right">'.$translate->_("Create Sandbox").'</button>
+          </div>
+        </form>
+      ');
+
+      $create_sandbox_modal->render();
+
+      // Edit sandbox modal
+      $edit_sandbox_modal = new Views_Gradebook_Modal([
+        "id" => "edit-sandbox",
+        "title" => $translate->_("Edit")." ".'"{{ update_sandbox.title }}"',
+      ]);
+
+      $edit_sandbox_modal->setBody('
+        <form class="form-horizontal" v-on:submit.prevent="updateSandbox(update_sandbox.id)">
+          <div class="control-group" v-bind:class="{ error: form_errors.title }">
+            <label class="control-label" for="updateTitle">'.$translate->_("Title").'</label>
+            <div class="controls">
+              <input type="text" id="updateTitle" placeholder="'.$translate->_("Title").'" v-model="update_sandbox.title">
+              <p v-if="form_errors.title" class="error text-error">
+                {{ form_errors.title }}
+              </p>
+            </div>
+          </div>
+          <div class="control-group" v-bind:class="{ error: form_errors.description }">
+            <label class="control-label" for="updateDescription">'.$translate->_("Description").'</label>
+            <div class="controls">
+              <textarea id="updateDescription" placeholder="'.$translate->_("Description").'" v-model="update_sandbox.description"></textarea>
+              <p v-if="form_errors.description" class="error text-error">
+                {{ form_errors.description }}
+              </p>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <button type="submit" class="btn btn-success pull-right">'.$translate->_("Update Sandbox").'</button>
+          </div>
+        </form>
+      ');
+
+      $edit_sandbox_modal->render();
+
+      ?>
+
+Here, we want to add the modals that will be used to create and edit sandboxes. 
+
+Notice that we are using View helpers to do most of the heavy lifting -- in this case, the existing `Views_Gradebook_Modal` class came in handy.
+
+**Including the custom JS file**
+
+    </div>
         <?php
-        /*
-         * Displays any flash messenger entries that exist.
-         */
-        Entrada_Utilities_Flashmessenger::displayMessages($MODULE);
-    
-        /*
-         * Checks the Entrada_ACL to ensure this current user can create new sandboxes. If they can then it will
-         * display the button.
-         */
-        if ($ENTRADA_ACL->amIAllowed("sandbox", "create")) {
-            echo "<a class=\"btn btn-success pull-right space-below\" href=\"" . ENTRADA_RELATIVE . "/admin/sandbox?section=add\"><i class=\"icon-plus-sign icon-white\"></i> " . $translate->_("Add New Sandbox") . "</a>";
-        }
-    
-        /*
-         * Models_Sandbox::fetchAllRecords() will return all non-deleted records from the sandboxes table as an array of objects.
-         */
-        $results = Models_Sandbox::fetchAllRecords();
-        if ($results) {
-            /*
-             * Checks the Entrada_ACL to ensure this current user can delete sandboxes.
-             */
-            $show_delete = ($ENTRADA_ACL->amIAllowed("sandbox", "delete") ? true : false);
-            ?>
-            <form action="<?php echo ENTRADA_RELATIVE; ?>/admin/sandbox?section=delete" method="post">
-                <table class="table table-striped">
-                    <thead>
-                        <tr>
-                            <th>&nbsp;</th>
-                            <th>Title</th>
-                            <th>Description</th>
-                        </tr>
-                    </thead>
-                    <?php if ($show_delete) : ?>
-                    <tfoot>
-                        <tr>
-                            <td colspan="3">
-                                <button class="btn btn-danger"><?php echo $translate->_("Delete Selected"); ?></button>
-                            </td>
-                        </tr>
-                    </tfoot>
-                    <?php endif; ?>
-                    <tbody>
-                    <?php foreach ($results as $result) : ?>
-                        <tr id="sandbox-<?php echo $result->getID(); ?>">
-                            <td>
-                                <?php if ($show_delete) : ?>
-                                <input type="checkbox" name="delete[]" value="<?php echo $result->getID(); ?>" />
-                                <?php else : ?>
-                                &nbsp;
-                                <?php endif; ?>
-                            </td>
-                            <td><a href="<?php echo ENTRADA_RELATIVE; ?>/admin/sandbox?section=edit&amp;id=<?php echo $result->getID(); ?>"><?php echo html_encode($result->getTitle()); ?></a></td>
-                            <td><?php echo html_encode($result->getDescription()); ?></td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </form>
-            <?php
-        }
+
+        // sandbox.js needs to run after DOM content
+        echo '<script src="'.ENTRADA_URL.'/javascript/sandbox.js?release='.html_encode(APPLICATION_VERSION).'"></script>';
     }
 
-#### 5. Create the new View Helpers
+Finally, we want to include the sandbox.js file that will contain our custom VueJS code. The reason why we include it last is because it needs to be run after the DOM content has been loaded.
+
+#### 5. Create the new Public Module
+
+Within `www-root/core/modules/public/sandbox.inc.php` place the following content:
+
+    <?php
+    /**
+     * Entrada [ http://www.entrada-project.org ]
+     *
+     * @author Matt Simpson <simpson@queensu.ca>
+     * @copyright Copyright 2016 Queen's University. All Rights Reserved.
+     */
+
+    if (!defined("PARENT_INCLUDED")) {
+        exit;
+    } elseif (!isset($_SESSION["isAuthorized"]) || !(bool) $_SESSION["isAuthorized"]) {
+        header("Location: " . ENTRADA_URL);
+        exit;
+    } elseif (!$ENTRADA_ACL->amIAllowed("sandbox", "read")) {
+        add_error("Your account does not have the permissions required to use this module.<br /><br />If you believe you are receiving this message in error please contact <a href=\"mailto:" . html_encode($AGENT_CONTACTS["administrator"]["email"]) . "\">" . html_encode($AGENT_CONTACTS["administrator"]["name"]) . "</a> for assistance.");
+
+        echo display_error();
+
+        application_log("error", "Group [" . $ENTRADA_USER->getActiveGroup() . "] and role [" . $ENTRADA_USER->getActiveRole() . "] do not have access to this module [" . $MODULE . "]");
+    } else {
+        $PAGE_META["title"] = "Public Side: Sandbox";
+        $PAGE_META["description"] = "";
+        $PAGE_META["keywords"] = "";
+
+        $BREADCRUMB[] = array("url" => ENTRADA_RELATIVE . "/sandbox", "title" => "Public Side: Sandbox");
+
+        $HEAD[]   = '<link rel="stylesheet" href="'.ENTRADA_URL.'/css/sandbox.css">';
+        $JQUERY[] = '<script src="https://unpkg.com/vue@2.2.1"></script>';
+        $JQUERY[] = '<script src="https://unpkg.com/axios@0.15.3/dist/axios.min.js"></script>';
+
+        $sidebar = new Views_Sandbox_Sidebar();
+        $sidebar->render();
+        ?>
+        <div id="module-sandbox">
+
+          <div class="pagination clearfix">
+
+            <p class="text-center summary">
+              <?php echo $translate->_("Page {{ sandboxes.current_page }} / {{ sandboxes.last_page }} &mdash; {{ sandboxes.total }} Sandboxes Found"); ?>
+            </p>
+
+            <ul class="pull-right">
+              <li v-bind:class="{ disabled:!sandboxes.prev_page_url }">
+                <a href="#" aria-label="Previous" title="Previous" v-on:click.prevent="sandboxes.prev_page_url ? getSandboxes(sandboxes.prev_page_url) : null">
+                  <span aria-hidden="true">«</span>
+                </a>
+              </li>
+              <li v-bind:class="{ disabled:!sandboxes.next_page_url }">
+                <a href="#" aria-label="Next" v-on:click.prevent="sandboxes.next_page_url ? getSandboxes(sandboxes.next_page_url) : null">
+                  <span aria-hidden="true">»</span>
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table table-borderless">
+              <tr>
+                <th width="150"><?php echo $translate->_("Title"); ?></th>
+                <th width="200"><?php echo $translate->_("Description"); ?></th>
+                <th><?php echo $translate->_("Created By"); ?></th>
+                <th><?php echo $translate->_("Updated By"); ?></th>
+              </tr>
+              <tr v-for="sandbox in sandboxes.data">
+                <td>{{ sandbox.title }}</td>
+                <td>{{ sandbox.description }}</td>
+                <td><span v-if="sandbox.created_by">{{ sandbox.created_by.firstname }} {{ sandbox.created_by.lastname }}</span></td>
+                <td><span v-if="sandbox.updated_by">{{ sandbox.updated_by.firstname }} {{ sandbox.updated_by.lastname }}</span></td>
+              </tr>
+            </table>
+          </div>
+
+          <?php
+
+          // Create sandbox modal
+          $create_sandbox_modal = new Views_Gradebook_Modal([
+            "id" => "create-sandbox",
+            "title" => $translate->_("Create New Sandbox"),
+          ]);
+
+          $create_sandbox_modal->setBody('
+            <form class="form-horizontal" v-on:submit.prevent="createSandbox">
+              <div class="control-group" v-bind:class="{ error: form_errors.title }">
+                <label class="control-label" for="newTitle">'.$translate->_("Title").'</label>
+                <div class="controls">
+                  <input type="text" id="newTitle" placeholder="'.$translate->_("Title").'" v-model="new_sandbox.title">
+                  <p v-if="form_errors.title" class="error text-error">
+                    {{ form_errors.title }}
+                  </p>
+                </div>
+              </div>
+              <div class="control-group" v-bind:class="{ error: form_errors.description }">
+                <label class="control-label" for="newDescription">'.$translate->_("Description").'</label>
+                <div class="controls">
+                  <textarea id="newDescription" placeholder="'.$translate->_("Description").'" v-model="new_sandbox.description"></textarea>
+                  <p v-if="form_errors.description" class="error text-error">
+                    {{ form_errors.description }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <button type="submit" class="btn btn-success pull-right">'.$translate->_("Create Sandbox").'</button>
+              </div>
+            </form>
+          ');
+
+          $create_sandbox_modal->render();
+
+          // Edit sandbox modal
+          $edit_sandbox_modal = new Views_Gradebook_Modal([
+            "id" => "edit-sandbox",
+            "title" => $translate->_("Edit")." ".'"{{ update_sandbox.title }}"',
+          ]);
+
+          $edit_sandbox_modal->setBody('
+            <form class="form-horizontal" v-on:submit.prevent="updateSandbox(update_sandbox.id)">
+              <div class="control-group" v-bind:class="{ error: form_errors.title }">
+                <label class="control-label" for="updateTitle">'.$translate->_("Title").'</label>
+                <div class="controls">
+                  <input type="text" id="updateTitle" placeholder="'.$translate->_("Title").'" v-model="update_sandbox.title">
+                  <p v-if="form_errors.title" class="error text-error">
+                    {{ form_errors.title }}
+                  </p>
+                </div>
+              </div>
+              <div class="control-group" v-bind:class="{ error: form_errors.description }">
+                <label class="control-label" for="updateDescription">'.$translate->_("Description").'</label>
+                <div class="controls">
+                  <textarea id="updateDescription" placeholder="'.$translate->_("Description").'" v-model="update_sandbox.description"></textarea>
+                  <p v-if="form_errors.description" class="error text-error">
+                    {{ form_errors.description }}
+                  </p>
+                </div>
+              </div>
+
+              <div class="control-group">
+                <button type="submit" class="btn btn-success pull-right">'.$translate->_("Update Sandbox").'</button>
+              </div>
+            </form>
+          ');
+
+          $edit_sandbox_modal->render();
+
+          ?>
+            
+        </div>
+        <?php
+
+        // sandbox.js needs to run after DOM content
+        echo '<script src="'.ENTRADA_URL.'/javascript/sandbox.js?release='.html_encode(APPLICATION_VERSION).'"></script>';
+    }
+
+It is identical to the admin version, except we have removed the create, edit and delete buttons, for a read-only experience.
+
+#### 6. Integrate VueJS and Axios for a single-page app experience
+
+In order for us to take advantage of the features of VueJS, we need to create a custom javascript file. 
+
+Create a file at `www-root/javascript/sandbox.js`, then insert the following content:
+    
+    // Set defaults
+    axios.defaults.baseURL = API_URL + '/sandbox'
+    axios.defaults.headers.common["Authorization"] = 'Bearer ' + JWT
+
+    // Intercept response
+    axios.interceptors.response.use(function(response) {
+
+      // If response has a new authorization header, replace it as default JWT
+      if (response.headers.authorization) {
+        axios.defaults.headers.common["Authorization"] = response.headers.authorization
+      }
+
+      return response
+    })
+
+    // Init Vue instance
+    var vm = new Vue({
+      el: '#module-sandbox',
+
+      data: {
+        sandboxes: {
+          total: 0,
+          per_page: 0,
+          current_page: 1,
+          last_page: 0,
+          next_page_url: null,
+          prev_page_url: null,
+          from: 0,
+          to: 0,
+          data: []
+        },
+        current_user_can: {
+          read: false,
+          create: false,
+          update: false,
+          delete: false
+        },
+        'new_sandbox': {
+          title: '',
+          description: ''
+        },
+        'update_sandbox': {
+          id: 0,
+          title: '',
+          description: ''
+        },
+        form_errors: {
+          title: '',
+          description: ''
+        }
+      },  
+
+      mounted: function() {
+        this.getSandboxes()
+      },
+
+      watch: {
+        
+        // When entering new data, empty out form errors
+
+        'new_sandbox.title': function (newValue) {
+          this.form_errors.title = ''
+        },
+
+        'new_sandbox.description': function (newValue) {
+          this.form_errors.description = ''
+        },
+
+        'update_sandbox.title': function (newValue) {
+          this.form_errors.title = ''
+        },
+
+        'update_sandbox.description': function (newValue) {
+          this.form_errors.description = ''
+        },
+
+      },
+
+      methods: {
+        
+        getSandboxes: function(url) {
+          var url = url ? url : axios.defaults.baseURL
+
+          axios.get(url).then((response) => {
+            this.sandboxes = Object.assign({}, response.data.sandboxes)
+            this.current_user_can = Object.assign({}, response.data.current_user_can)
+          })
+        },
+
+        getPage: function(page) {
+          this.getSandboxes(axios.defaults.baseURL + '?page=' + page)
+        },
+
+        createSandbox: function() {
+          var params = new URLSearchParams();
+          params.append('title', this.new_sandbox.title)
+          params.append('description', this.new_sandbox.description)
+
+          axios.post('', params).then((response) => {
+            this.getPage(this.sandboxes.current_page)
+
+            this.new_sandbox = {
+              title: '',
+              description: ''
+            }
+
+            jQuery('#create-sandbox').modal('hide')
+          })
+          .catch(this.handleFormErrors)
+        },
+
+        editSandbox: function(sandbox) {
+          this.update_sandbox.id = sandbox.id
+          this.update_sandbox.title = sandbox.title
+          this.update_sandbox.description = sandbox.description
+
+          this.form_errors = {
+            title: '',
+            description: ''
+          }
+
+          jQuery("#edit-sandbox").modal('show');
+        },
+
+        updateSandbox: function(id) {
+          var params = new URLSearchParams();
+          params.append('title', this.update_sandbox.title)
+          params.append('description', this.update_sandbox.description)
+
+          axios.put('/' + id, params).then((response) => {
+            this.getPage(this.sandboxes.current_page)
+
+            this.update_sandbox = {
+              id: 0,
+              title: '',
+              description: ''
+            }
+
+            jQuery("#edit-sandbox").modal('hide');
+          })
+          .catch(this.handleFormErrors)
+        },
+
+        deleteSandbox: function(id) {
+          if (confirm('Are you sure you want to delete this sandbox?')) {
+            axios.delete('/' + id).then((response) => {
+              this.getPage(this.sandboxes.current_page)
+            })
+          }
+        },
+
+        handleFormErrors: function(error) {
+          if (error.response && error.response.data.title) {
+            this.form_errors.title = error.response.data.title[0]
+          }
+
+          if (error.response && error.response.data.description) {
+            this.form_errors.description = error.response.data.description[0]
+          }
+        }
+      },
+    })
+
+Let's go through this step by step: 
+
+**Setting up common defaults and automatic token renewal**
+
+    // Set defaults
+    axios.defaults.baseURL = API_URL + '/sandbox'
+    axios.defaults.headers.common["Authorization"] = 'Bearer ' + JWT
+
+    // Intercept response
+    axios.interceptors.response.use(function(response) {
+
+      // If response has a new authorization header, replace it as default JWT
+      if (response.headers.authorization) {
+        axios.defaults.headers.common["Authorization"] = response.headers.authorization
+      }
+
+      return response
+    })
+
+First, you will want to use the global JS variables API_URL and JWT to set up the default values.
+
+Next, we want to make sure we handle automatic token renewals coming from the `jwt.refreshWhenExpires` middleware on the API side. 
+
+Since the new token is always attached to the response, we use a response interceptor to automatically reset the default Authorization header.
+
+**Initializing the VueJS instance**
+
+To initialize the VueJS instance, we need to set a few different keys: 
+
+- `el`: the element the instance binds to
+
+- `data`: the default state of the data being stored in memory
+
+- `mounted`: sort of like document.ready in the jQuery world, this is a function that runs upon starting up the instance.
+
+- `watches`: these are event-based functions that run whenever the variable gets changed. 
+
+- `methods`: where all the logic lives for performing CRUD operations.
+
+#### 7. Create the new View Helpers
 
 A view helper allows you to create a single block of reusable code that can be displayed in many places. There are quite a few presently undocumented options and features of our view helpers so we would encourage you to review the files within the `www-root/core/library/Views/` directory for more information. Developer Tip: `HTMLTemplate.php` is an especially interesting feature.
 
